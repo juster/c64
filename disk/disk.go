@@ -50,8 +50,6 @@ const (
 
 var (
 	BadTS = errors.New("invalid track/sector")
-	OutOfRange = errors.New("out of BAM range")
-	BAMConflict = errors.New("already taken or freed")
 )
 
 type geom struct {
@@ -368,9 +366,14 @@ func (d *Img) NewDirEntry() (*DirEntry, error) {
 			continue
 		}
 		// try to allocate the next directory block
-		ts = a.Alloc()
-		if ts.T == 0 {
+		ts, err := a.Alloc()
+		switch err {
+		case nil:
+			// do nothing
+		case DiskFull:
 			return nil, errors.New("no room left in directory track")
+		default:
+			return nil, err
 		}
 		dir.SetNext(ts)
 		dir = (*DirBlock)(d.Block(ts))
@@ -378,93 +381,3 @@ func (d *Img) NewDirEntry() (*DirEntry, error) {
 	return file, nil
 }
 
-type NextTrackFunc = func (uint8) uint8
-
-type Allocator struct {
-	bam *BAM
-	TS TS
-	SectorStagger uint8
-	NextTrack NextTrackFunc
-}
-
-func defaultNextTrack(prev uint8) uint8 {
-	var next uint8
-	if prev > bamTrack {
-		next = prev + 1
-		if next <= totalTrackCount {
-			return next
-		}
-		prev = bamTrack
-	}
-	next = prev - 1
-	if next > 0 {
-		return next
-	}
-	return 0
-}
-
-func (bam *BAM) NewAllocator() *Allocator {
-	return &Allocator{
-		bam: bam,
-		// TS is the next track/sector to try to allocate
-		TS: TS{bamTrack + 1, 0},
-		SectorStagger: SectorFileStagger,
-		NextTrack: defaultNextTrack,
-	}
-}
-
-func (a *Allocator) Alloc() TS {
-	if a.TS.T == 0 {
-		return a.TS
-	}
-
-	ts := a.TS
-	if !a.bam.Avail(ts) {
-		ts = a.nextTS(ts)
-		if ts.T == 0 {
-			a.TS = ts
-			return ts
-		}
-	}
-
-	if err := a.bam.Alloc(ts); err != nil {
-		panic(err)
-	}
-	a.TS = a.nextTS(ts)
-	return ts
-}
-
-func (a *Allocator) nextTS(ts TS) TS {
-	var next TS
-	for iter := ts; iter.T > 0; iter = next {
-		next = a.trackAvail(iter)
-		if next.T > 0 {
-			break
-		}
-		next.T, next.S = a.NextTrack(iter.T), 0
-		if next.T == 0 {
-			return TS{}
-		}
-	
-	}
-	return next
-}
-
-// trackAvail finds the next available block in the same track as ts, starting
-// with ts. Returns TS{0, 0} if no blocks are available on that track.
-func (a *Allocator) trackAvail(ts TS) TS {
-	max := sectorCount(ts.T) - 1
-
-	// Check every sector on the track.
-	for i := uint8(0); i <= max; i++ {
-		if a.bam.Avail(ts) {
-			return ts
-		}
-		ts.S += a.SectorStagger
-		if ts.S > max {
-			ts.S = 1 + ts.S % max
-		}
-	}
-	
-	return TS{}
-}

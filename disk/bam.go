@@ -4,6 +4,12 @@ import (
 	"errors"
 )
 
+var (
+	OutOfRange = errors.New("out of BAM range")
+	BAMConflict = errors.New("already taken or freed")
+	DiskFull = errors.New("disk full")
+)
+
 type BAMEntry struct {
 	Count byte;
 	free [3]byte;
@@ -103,4 +109,103 @@ func (bam *BAM) Avail(ts TS) bool {
 	}
 	i, j := ts.S / 8, byte(1 << (ts.S % 8))
 	return ent.free[i] & j > 0
+}
+
+type NextTrackFunc = func (uint8) uint8
+
+type Allocator struct {
+	bam *BAM
+	// Lookahead for the next track/sector to attempt to allocate.
+	TS TS
+	// There are gaps of sectors between allocated blocks because it is easier
+	// to read on the spinning disk than blocks that are allocated
+	// contiguously.
+	SectorStagger uint8
+	// Next available track algorithm may be overridden.
+	NextTrack NextTrackFunc
+}
+
+// The defaultNextTrack function looks for tracks outside of the BAM (middle)
+// track. After those run it it looks for tracks from the BAM track inwards.
+func defaultNextTrack(prev uint8) uint8 {
+	var next uint8
+	if prev > bamTrack {
+		next = prev + 1
+		if next <= totalTrackCount {
+			return next
+		}
+		prev = bamTrack
+	}
+	next = prev - 1
+	if next > 0 {
+		return next
+	}
+	return 0
+}
+
+func (bam *BAM) NewAllocator() *Allocator {
+	return &Allocator{
+		bam: bam,
+		// Start trying to allocate at the track directly after the BAM.
+		TS: TS{bamTrack + 1, 0},
+		SectorStagger: SectorFileStagger,
+		NextTrack: defaultNextTrack,
+	}
+}
+
+func (a *Allocator) Alloc() (TS, error) {
+	if a.TS.T == 0 {
+		return TS{0, 0}, DiskFull
+	}
+
+	ts := a.TS
+	if !a.bam.Avail(ts) {
+		ts = a.nextTS(ts)
+		if ts.T == 0 {
+			a.TS = ts
+			return ts, nil
+		}
+	}
+
+	if err := a.bam.Alloc(ts); err != nil {
+		return TS{0, 0}, err
+	}
+	// Lookahead to the next track/sector to attempt to alloc.
+	a.TS = a.nextTS(ts)
+	return ts, nil
+}
+
+func (a *Allocator) nextTS(ts TS) TS {
+	var next TS
+	for iter := ts; iter.T > 0; iter = next {
+		next = a.nextAvailBlock(iter)
+		if next.T > 0 {
+			break
+		}
+		next.T, next.S = a.NextTrack(iter.T), 0
+		if next.T == 0 {
+			return TS{}
+		}
+	
+	}
+	return next
+}
+
+// nextAvailBlock finds the next available block in the same track as ts, starting
+// with ts. Returns TS{0, 0} if no blocks are available on that track.
+func (a *Allocator) nextAvailBlock(ts TS) TS {
+	max := sectorCount(ts.T) - 1
+
+	// Check every sector on the track.
+	for i := uint8(0); i <= max; i++ {
+		if a.bam.Avail(ts) {
+			return ts
+		}
+		ts.S += a.SectorStagger
+		if ts.S > max {
+			ts.S = 1 + ts.S % max
+		}
+	}
+	
+	return TS{}
 }
