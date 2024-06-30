@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,7 +24,7 @@ var (
 )
 
 func createUsage() {
-	fmt.Fprintf(createFlags.Output(), "usage: %s create <-f dest.d64> <-lab \"disk label\"> [-id 010F] <file1> <file2...>\n", self)
+	fmt.Fprintf(createFlags.Output(), "usage: %s c[reate] <-f dest.d64> <-lab \"disk label\"> [-id 010F] <file1> <file2...>\n", self)
 	createFlags.PrintDefaults()
 	os.Exit(2)
 }
@@ -117,9 +116,9 @@ func createFile(fname string, buf []byte, d *disk.Img) {
 	bam := d.BAM()
 
 	a := bam.NewAllocator()
-	ts := a.Alloc()
-	if ts.T == 0 {
-		log.Fatal("allocation failed")
+	ts, err := a.Alloc()
+	if err != nil {
+		log.Fatal(err)
 	}
 	ent, err := d.NewDirEntry()
 	if err != nil {
@@ -155,11 +154,12 @@ func writeRawBlocks(d *disk.Img, blk *disk.RawBlock, a *disk.Allocator, buf []by
 	}
 	var i int
 	var ts disk.TS
+	var err error
 	for {
 		// take the next block from the BAM and link the current block to it
-		ts = a.Alloc()
-		if ts.T == 0 {
-			return errors.New("disk full")
+		ts, err = a.Alloc()
+		if err != nil {
+			return err
 		}
 		blk.Link = ts
 
